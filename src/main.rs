@@ -1,13 +1,26 @@
 // use std::io::Read;
 // use std::fs::File;
+use std::time::Instant;
 
-mod io_controller;
+mod readfile;
 mod algorithms;
 
 fn main() {
     println!("Hello, world!");
 
+    // _ = algorithms::lz77::compress("data1.txt");
+
+    let t1 = Instant::now();
     _ = algorithms::lz77::compress("data1.txt");
+    // _ = algorithms::lz77::compress("t2.txt");
+
+
+    // _ = algorithms::lz77::decompress("out.txt");
+
+
+    let dur = t1.elapsed().as_secs_f64();
+
+    println!("DUR: {dur}");
 
     // _ = read_file("t100.txt");
     // _ = read_file("data1.txt");
@@ -25,7 +38,7 @@ fn main() {
     // println!("{:?}", &buf[..n]);
 
 
-    println!("enter mes");
+    println!("end main");
 
     // let mut mes = String::new();
 
