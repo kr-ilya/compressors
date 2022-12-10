@@ -1,2 +1,4 @@
 /target
 *.txt
+*.lz77
+.vscode

@@ -1,23 +1,13 @@
-use std::{
-    fs::File,
-    io::BufReader,
-    io::BufWriter,
-    io::Write,
-    io::Read,
-    fs::OpenOptions,
-    str,
-    cmp,
-};
-use byteorder::{LittleEndian, WriteBytesExt, ReadBytesExt};
-use crate::readfile::IterChunks;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::{cmp, fs::File, fs::OpenOptions, io, io::BufWriter, io::Write, str};
+
+use crate::io_tools::read_file;
 
 type CodeInt = u32;
 
-const WINDOW_SIZE: usize = 10; // 4 KB
-const BUFER_SIZE: usize = 4096;
-const OUT_BUFFER_SIZE: usize = 4096; // number of CODES in the output buffer
-const COMPRESSED_CHUNK_SIZE: usize = 456 * 9; // read number of BYTES (a multiple of 9)
-
+const WINDOW_SIZE: usize = 32768; // 32 KB
+const BUFFER_SIZE: usize = 32768;
+const OUT_BUFFER_SIZE: usize = 450000; // number of CODES in the output buffer
 
 #[derive(Debug)]
 struct Code {
@@ -26,27 +16,24 @@ struct Code {
     length: CodeInt,
 }
 
-
-fn find_match(data: &[u8], buf: &Vec<u8>) -> Code {
-    
+fn find_match(data: &[u8], buf: &Vec<u8>, compression_lvl: usize) -> Code {
     let buf_len = buf.len();
     let data_len = data.len();
-    
+    let end_len = cmp::min(data_len, WINDOW_SIZE);
+
     if buf_len == 0 {
         Code {
             literal: data[0],
             offset: 0,
-            length: 0
+            length: 0,
         }
-    }else{
-        
+    } else {
         let mut best_length: CodeInt = 0;
         let mut best_offset: CodeInt = 0;
         let mut current_byte: u8;
         let next_byte: u8;
 
         for i in 0..buf_len {
-
             let mut current_length: CodeInt = 0;
             let mut ow_length: CodeInt = 0;
             let mut ow_flag: bool = false;
@@ -54,310 +41,215 @@ fn find_match(data: &[u8], buf: &Vec<u8>) -> Code {
             loop {
                 if i + (current_length as usize) < buf_len {
                     current_byte = buf[i + (current_length as usize)];
-                }else{
+                } else {
                     current_byte = data[ow_length as usize];
                     ow_flag = true;
                 }
 
-
                 if current_byte != data[current_length as usize] {
                     break;
-                }else {
+                } else {
                     current_length += 1;
 
                     if ow_flag {
                         ow_length += 1;
                     }
-                    
-                    if current_length as usize == data_len {
-                        // println!("{current_length}");
+
+                    if current_length as usize == end_len {
                         break;
                     }
-                }                
+                }
             }
-            
+
             if current_length > best_length {
                 best_length = current_length;
                 best_offset = i as u32;
+
+                if compression_lvl == 1 {
+                    break;
+                }
             }
         }
 
-        if best_length as usize != data_len {
-            next_byte = data[best_length as usize];
-        }else {
+        if best_length as usize == data_len {
             next_byte = 0;
+        } else {
+            if (best_length as usize) == WINDOW_SIZE {
+                best_length -= 1;
+            }
+            next_byte = data[best_length as usize];
         }
 
         Code {
             literal: next_byte,
             offset: best_offset,
-            length: best_length
+            length: best_length,
         }
     }
 }
 
-pub fn compress(file_name: &str) -> std::io::Result<()>{
-    let file_in = BufReader::new(File::open(file_name)?);
+fn write_codes(file_out: &mut BufWriter<File>, codes: &Vec<Code>) {
+    let mut out_buffer: Vec<u8> = Vec::new();
 
-    let file_out = OpenOptions::new().write(true).create(true).truncate(true).open("out.txt").expect("Eroro");
+    for v in codes {
+        out_buffer.push(v.literal);
+        out_buffer.write_u32::<LittleEndian>(v.offset).unwrap();
+        out_buffer.write_u32::<LittleEndian>(v.length).unwrap();
+    }
+
+    let a: &[u8] = &out_buffer;
+    file_out.write_all(a).unwrap();
+    file_out.flush().unwrap();
+
+    out_buffer.clear();
+}
+
+/// File compression
+///
+/// # Arguments
+///
+/// * `file_name` - Name of input file
+/// * `compression_lvl` - Compression level
+///
+/// # Compression level:
+/// - 0 - Slow, best compression
+/// - 1 - Fast, standart compression
+pub fn compress(file_name: &str, compression_lvl: usize) -> Result<&str, io::Error> {
+    let file_out = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(file_name.to_owned() + ".lz77")?;
+
     let mut out_writer = BufWriter::new(file_out);
 
     let mut codes: Vec<Code> = Vec::new();
-    let mut buffer: Vec<u8> = Vec::new();
+    let mut buffer: Vec<u8> = Vec::with_capacity(BUFFER_SIZE);
     let mut full_buffer: bool = false;
-    let mut nt = 0;
-    let mut st = 0;
-    let mut cn = 0;
-    for chunk in file_in.iter_chunks(WINDOW_SIZE as usize) {
-        match chunk {
-            Ok(data) => {
-                cn += 1;
-                // println!("{:?}", data);
-                let data_len = data.len();
-                let mut viewed_len: usize = 0;
+    let mut data: Vec<u8> = Vec::new();
 
-                
-                let mut out_buffer: Vec<u8> = Vec::new();
-                
-                while viewed_len < data_len {
-                    // println!("{:?}", buffer);
+    let data_len = read_file(file_name, &mut data)?;
 
-                    //  TO DO
-                    //  ПРОЧИТАТЬ ССЛЕЮЩУИЙ ЧАНК, ЧТОБЫ ПРАВИЛЬНО ЗАКОДИРОВАТЬ
-                    // 
+    let mut viewed_len: usize = 0;
 
+    while viewed_len < data_len {
+        let encoded: Code = find_match(&data[viewed_len..], &buffer, compression_lvl);
 
-                    let encoded: Code = find_match(&data[viewed_len..], &buffer);
-
-                    let mut ec = 1;
-                    if viewed_len + (encoded.length as usize) + 1 > data_len {
-                        ec = 0;
-                    }
-
-                    let mut i = (encoded.length as usize) + ec;
-                    let mut data_slice_from = viewed_len;
-                    let data_slice_to = viewed_len + (encoded.length as usize) + ec;
-
-                    if i > BUFER_SIZE {
-                        data_slice_from = data_slice_to - BUFER_SIZE;
-                        full_buffer = true;
-                        i = BUFER_SIZE-1 + ec;
-                    }
-
-                    if full_buffer == true {
-                        buffer.rotate_left(cmp::min(i-1, BUFER_SIZE));
-                    }
-
-                    for v in &data[data_slice_from..data_slice_to] {
-
-                        if full_buffer == false {
-                            
-                            buffer.push(*v);
-
-                            if buffer.len() == BUFER_SIZE {
-                                full_buffer = true;
-                                // TO DO
-                                // change to pointer
-                                buffer.rotate_left(cmp::min(i-1, BUFER_SIZE));
-                            }
-                            
-                        } else {
-                            buffer[BUFER_SIZE-1-(i-1)] = *v;
-                        }
-                        
-                        i = i - 1;
-                    }     
-                    
-                    viewed_len += (encoded.length as usize) + ec;
-                    // println!("VL {viewed_len}");
-                    codes.push(encoded);
-                    nt += 1;
-
-                    if codes.len() == OUT_BUFFER_SIZE {
-                        // println!("Write codes to file");
-
-                        for v in &codes {
-                            st += 1;
-                            out_buffer.push(v.literal);
-                            out_buffer.write_u32::<LittleEndian>(v.offset).unwrap();
-                            out_buffer.write_u32::<LittleEndian>(v.length).unwrap();
-                        }
-
-                        let a: &[u8] = &out_buffer;
-                        out_writer.write_all(a)?;
-                        out_writer.flush()?;
-                        
-                        out_buffer.clear();
-                        codes.clear();
-                    }
-
-                };
-
-                // println!("{:?}", codes);
-
-                
-                for v in &codes {
-                    st += 1;
-                    out_buffer.push(v.literal);
-                    out_buffer.write_u32::<LittleEndian>(v.offset).unwrap();
-                    out_buffer.write_u32::<LittleEndian>(v.length).unwrap();
-                }
-
-                // println!("{:?}", out_buffer);
-            
-                // WRITE
-                let a: &[u8] = &out_buffer;
-                out_writer.write_all(a)?;
-                out_writer.flush()?;
-
-                out_buffer.clear();
-                codes.clear();
-
-            },
-            Err(e) => println!("E: {e}"),
+        let mut ec = 1;
+        if viewed_len + (encoded.length as usize) + 1 > data_len {
+            ec = 0;
         }
-        
+
+        let mut i = (encoded.length as usize) + ec;
+
+        let mut data_slice_from = viewed_len;
+        let data_slice_to = viewed_len + (encoded.length as usize) + ec;
+
+        if i > BUFFER_SIZE {
+            data_slice_from = data_slice_to - BUFFER_SIZE;
+            i = BUFFER_SIZE;
+        }
+
+        if full_buffer == true && i < BUFFER_SIZE {
+            buffer.rotate_left(i);
+        }
+
+        for v in &data[data_slice_from..data_slice_to] {
+            if full_buffer == false {
+                buffer.push(*v);
+                i = i - 1;
+
+                if buffer.len() == BUFFER_SIZE {
+                    full_buffer = true;
+                    buffer.rotate_left(cmp::min(i, BUFFER_SIZE));
+                }
+            } else {
+                buffer[BUFFER_SIZE - 1 - (i - 1)] = *v;
+                i = i - 1;
+            }
+        }
+
+        viewed_len += (encoded.length as usize) + ec;
+        codes.push(encoded);
+
+        if codes.len() == OUT_BUFFER_SIZE {
+            write_codes(&mut out_writer, &codes);
+            codes.clear();
+        }
     }
 
-    if codes.len() > 0 {
-        // println!("Write END codes to file");
-        codes.clear();
-    }
-    // 863 372696 848
-    println!("{nt} {st} {cn}");
-    Ok(())
+    write_codes(&mut out_writer, &codes);
+    codes.clear();
+
+    Ok("Ok")
 }
 
-// TO DO
-// change buffers to array[], prmf
-
-pub fn decompress(file_name: &str) -> std::io::Result<()> {
-    let file_in = BufReader::new(File::open(file_name)?);
-
-    let file_out = OpenOptions::new().write(true).create(true).truncate(true).open("decompressed.txt").expect("Eroro");
+/// File decompression
+///
+/// # Arguments
+///
+/// * `file_name` - Name of the compressed file
+/// * `out_file_name` - Output file name
+pub fn decompress<'a>(file_name: &'a str, out_file_name: &'a str) -> Result<&'a str, io::Error> {
+    let file_out = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(out_file_name)?;
     let mut out_writer = BufWriter::new(file_out);
 
     let mut result: Vec<u8> = Vec::new();
-    let mut full_buffer: bool = false;
-    let mut buf_len = 0;
-    let mut sss = 0;
-    let mut ch = 0;
-    for chunk in file_in.iter_chunks(COMPRESSED_CHUNK_SIZE as usize) {
-        match chunk {
-            Ok(data) =>{
+    let mut data: Vec<u8> = Vec::new();
 
-                println!("{:?}", data);
+    let data_len = read_file(file_name, &mut data)?;
 
-                ch += 1;
-                let data_len = data.len();
-                let mut viewed_len: usize = 0;
+    let mut viewed_len: usize = 0;
 
-                while(viewed_len < data_len) {
-                    // println!("A1 {}", data_len);
-                    // println!("{} {:?} {:?}", data[viewed_len], &data[viewed_len+1..viewed_len+5], &data[viewed_len+5..viewed_len+9]);
+    while viewed_len < data_len {
+        let literal: u8 = data[viewed_len];
+        let offset: CodeInt = (&data[viewed_len + 1..])
+            .read_u32::<LittleEndian>()
+            .unwrap();
+        let length: CodeInt = (&data[viewed_len + 5..])
+            .read_u32::<LittleEndian>()
+            .unwrap();
 
-                    // println!("{viewed_len}");
-                    // let literal: u8 = data[viewed_len];
-                    // let offset:CodeInt = (&data[viewed_len+1..]).read_u32::<LittleEndian>().unwrap();
-                    // let length:CodeInt = (&data[viewed_len+5..]).read_u32::<LittleEndian>().unwrap();
-                    sss += 1;
-                    // println!("a {} {} {}", literal, offset, length);
-                    
-                    // let mut i = (length + 1) as usize;
+        if length == 0 {
+            result.push(literal);
+        } else {
+            let res_len = result.len();
 
-                    
-                    // if i + buf_len-1 > BUFER_SIZE {
-                    //     // WRITE TO FILE
-                    //     let a: &[u8] = &result;
-                    //     out_writer.write_all(a)?;
-                    //     out_writer.flush()?;
+            let mut tmpstr: Vec<u8> = Vec::new();
 
+            let mut sf = 0;
+            if res_len > BUFFER_SIZE {
+                sf = res_len - BUFFER_SIZE;
+            }
 
-                    //     // println!("WR");
-                    //     // println!("{:?}", result);
-                    //     full_buffer = true;
-                    //     buf_len = 0;
-                    // }
+            let mut nt = length as usize;
 
-                    // if length == 0 {
-                    //     if full_buffer == true {
-                    //         result.rotate_left(1);
-                    //         result[BUFER_SIZE-1] = literal;
-                    //     } else {
-                    //         result.push(literal);
-                    //     }
-                    //     buf_len += 1;
-                    // }else{
-                    //     let res_len = result.len();
+            while nt > 0 {
+                let st = cmp::min(res_len - (sf + offset as usize), nt);
+                tmpstr
+                    .extend_from_slice(&result[(sf + offset as usize)..sf + offset as usize + st]);
+                nt -= st;
+            }
 
-                    //     // check length > len-offset
-                    //     let mut tmpstr: Vec<u8> = Vec::new();
-                    //     let mut tml_len = length as usize;
+            for v in &tmpstr {
+                result.push(*v);
+            }
 
-                    //     while tml_len != 0 {
-                    //         let tl = cmp::min(res_len - (offset as usize), tml_len as usize);
-                    //         tmpstr.extend_from_slice(&result[(offset as usize)..(offset as usize+tl)]);
-                    //         tml_len -= tl;
-                    //     }
-
-                        
-                    //     buf_len += i;
-
-                    //     if full_buffer == true {
-                    //         result.rotate_left(cmp::min(i, BUFER_SIZE));
-                    //     }
-
-                    //     let mut ts = 0;
-                    //     while i != 1 {
-                    //         let mut j = cmp::min(BUFER_SIZE-1, i);
-                    //         // println!("J = {j} {i}");
-                    //         while j != 1 {
-                    //             if full_buffer == true {
-                    //                 result[BUFER_SIZE-1 - j] = tmpstr[ts];                                   
-                    //             }else {
-                    //                 result.push(tmpstr[ts]);
-                    //             }
-                    //             i -= 1;
-                    //             j -= 1;
-                    //             ts += 1;
-                    //         }
-                    //         // println!("pI = {i} {j}");
-                    //         if i > 1 {
-                    //             // println!("I = {i} {j}");
-                    //             let a: &[u8] = &result;
-                    //             out_writer.write_all(a)?;
-                    //             out_writer.flush()?;
-                    //             result.rotate_left(cmp::min(i, BUFER_SIZE));
-                    //         }
-                    //     }
-
-                    //     if literal != 0 {
-                    //         if full_buffer == true {
-                    //             result[BUFER_SIZE-1] = literal;
-                    //         }else{
-                    //             result.push(literal);
-                    //         }
-                    //     }
-
-                    // }
-
-                    viewed_len += 9;
-                }
-                
-            },
-            Err(e) => println!("Decompress error"),
+            if literal != 0 {
+                result.push(literal);
+            }
         }
+
+        viewed_len += 9;
     }
-    
-    println!("s {sss}");
-    println!("c {ch}");
-    println!("L WR");
-    // println!("{:?}", result);
 
     let a: &[u8] = &result;
     out_writer.write_all(a)?;
     out_writer.flush()?;
-    
 
-    Ok(())
+    Ok("Ok")
 }
