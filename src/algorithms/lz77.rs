@@ -115,6 +115,13 @@ fn write_codes(file_out: &mut BufWriter<File>, codes: &Vec<Code>) {
 /// - 0 - Slow, best compression
 /// - 1 - Fast, standart compression
 pub fn compress(file_name: &str, compression_lvl: usize) -> Result<&str, io::Error> {
+    let mut codes: Vec<Code> = Vec::new();
+    let mut buffer: Vec<u8> = Vec::with_capacity(BUFFER_SIZE);
+    let mut full_buffer: bool = false;
+    let mut data: Vec<u8> = Vec::new();
+
+    let data_len = read_file(file_name, &mut data).unwrap();
+
     let file_out = OpenOptions::new()
         .write(true)
         .create(true)
@@ -122,13 +129,6 @@ pub fn compress(file_name: &str, compression_lvl: usize) -> Result<&str, io::Err
         .open(file_name.to_owned() + ".lz77")?;
 
     let mut out_writer = BufWriter::new(file_out);
-
-    let mut codes: Vec<Code> = Vec::new();
-    let mut buffer: Vec<u8> = Vec::with_capacity(BUFFER_SIZE);
-    let mut full_buffer: bool = false;
-    let mut data: Vec<u8> = Vec::new();
-
-    let data_len = read_file(file_name, &mut data)?;
 
     let mut viewed_len: usize = 0;
 
@@ -191,17 +191,17 @@ pub fn compress(file_name: &str, compression_lvl: usize) -> Result<&str, io::Err
 /// * `file_name` - Name of the compressed file
 /// * `out_file_name` - Output file name
 pub fn decompress<'a>(file_name: &'a str, out_file_name: &'a str) -> Result<&'a str, io::Error> {
+    let mut result: Vec<u8> = Vec::new();
+    let mut data: Vec<u8> = Vec::new();
+
+    let data_len = read_file(file_name, &mut data).unwrap();
+
     let file_out = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(out_file_name)?;
     let mut out_writer = BufWriter::new(file_out);
-
-    let mut result: Vec<u8> = Vec::new();
-    let mut data: Vec<u8> = Vec::new();
-
-    let data_len = read_file(file_name, &mut data)?;
 
     let mut viewed_len: usize = 0;
 
